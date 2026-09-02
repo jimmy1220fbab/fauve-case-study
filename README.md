@@ -8,11 +8,11 @@ image, and it grades your photos and video and keeps every layer editable. It pr
 automatically, matches a hundred clips to one another, and exports ProRes, DNxHR, HDR and
 standard `.cube` LUTs.
 
-The interesting constraint was not making the color good. It was making the product cheap
-enough to run that I could sell it for a fixed price, once, and still be solvent in three years.
+The hard constraint was not color quality. It was making the product cheap enough to run that a
+one-time licence stays solvent for years — which is an architecture problem, not a pricing one.
 
 Fauve is the AI-native evolution of FlexPresets, a photography presets and LUT business I ran
-for four years — which is where its customers came from.
+for five years.
 
 Source code is private. This is the public write-up.
 
@@ -24,18 +24,18 @@ Source code is private. This is the public write-up.
 flowchart TB
   IN["Photo, video, RAW, log footage"] --> IMPORT
 
-  subgraph Graph["Grade Graph — four layers, one of them costs money"]
-    IMPORT["Base Balance<br/>deterministic · once per clip<br/>NO AI"] --> CREATIVE
-    CREATIVE["Creative Look<br/>image model produces a color anchor<br/>solved into a 3D LUT and discarded<br/>THE AI LAYER"] --> SECOND
-    SECOND["Secondary<br/>skin + sky protection<br/>on-device face detect and person matting<br/>NO AI · NO CHARGE"] --> FINISH
-    FINISH["Finish<br/>grain, clarity, halation, vignette<br/>parallel vision call · same request"]
+  subgraph Graph["Grade Graph v2 — four layers, one costs money"]
+    IMPORT["Base Balance<br/>exposure, WB, contrast normalization<br/>deterministic, once per clip at import"] --> CREATIVE
+    CREATIVE["Creative Look — THE AI LAYER<br/>gpt-image-2 returns a color anchor<br/>computeColorTransfer maps distribution<br/>result baked to a 3D LUT, anchor discarded"] --> SECOND
+    SECOND["Secondary<br/>BlazeFace + RVM person matting, on-device<br/>10 Hz mask track, skin and sky guards<br/>no model call, no charge"] --> FINISH
+    FINISH["Finish<br/>grain, clarity, halation, vignette<br/>gpt-5.6-luna vision, same request"]
   end
 
-  FINISH --> FLAT["flattenGradeGraph<br/>one output"]
+  FINISH --> FLAT["flattenGradeGraph()"]
 
   subgraph Render["One math, six renderers"]
     FLAT --> W["WebGL preview"]
-    FLAT --> C["CPU twin · bakes LUT cubes"]
+    FLAT --> C["CPU twin — bakes LUT cubes"]
     FLAT --> M1["iOS Metal"]
     FLAT --> M2["Android OpenGL"]
     FLAT --> M3["macOS Metal worker"]
@@ -43,126 +43,190 @@ flowchart TB
   end
 
   PROMPT["Text prompt"] --> ROUTER{"Adjust Router"}
-  ROUTER -->|correction| FREE1["On-device dial move<br/>free, instant"]
-  ROUTER -->|undo / redo / reset| FREE2["Replay existing op<br/>free"]
-  ROUTER -->|not about color| DECLINE["Declined in words<br/>nothing charged"]
-  ROUTER -->|name a look| CREATIVE
+  ROUTER -->|tools| FREE1["On-device dial move<br/>free, instant"]
+  ROUTER -->|history| FREE2["Replay existing op<br/>free"]
+  ROUTER -->|out_of_scope| DECLINE["Declined in words<br/>nothing charged"]
+  ROUTER -->|regenerate| CREATIVE
 
-  BATCH["Batch: 100 clips"] --> ANCHOR["AI grade the anchor clip · 1 charge"]
-  ANCHOR --> MATCH["Match the other 99 deterministically · free"]
+  BATCH["Batch: 100 clips"] --> ANCHOR["AI-grade the anchor · 1 charge"]
+  ANCHOR --> MATCH["Converge the other 99<br/>deterministically · free"]
 
-  CREATIVE -.token + USD.-> LEDGER[("AI cost ledger")]
-  FINISH -.token + USD.-> LEDGER
+  CREATIVE -.tokens + USD.-> LEDGER[("ai_cost_ledger")]
+  FINISH -.tokens + USD.-> LEDGER
 ```
 
 ---
 
-## The pricing decision came first
+## Request lifecycle: one grade
 
-Fauve sells a **perpetual licence**, not a subscription. New customers pay once — list US$129,
-with local pricing in nine currencies — and own it.
+Both model calls live inside a single `/api/anchor-match` request and cost one AI grade
+together. Everything downstream of the LUT is deterministic and free.
 
-You cannot sell a perpetual licence on a product whose cost of goods recurs every time someone
-uses it. So the licence was not a marketing decision made at the end. It was a constraint set
-at the start, and the architecture below is what it takes to satisfy it.
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant API as /api/anchor-match
+  participant IMG as gpt-image-2
+  participant VIS as gpt-5.6-luna
+  participant L as ai_cost_ledger
 
-The included AI-grade allowance is documented in the codebase as *"an anti-abuse gate, not a
-billing unit — median usage makes it last years."* That sentence is only writable if the
-product is designed so that the expensive operation is rare and the valuable operations are
-free.
+  C->>API: base-corrected frame + prompt or reference
+  par color anchor
+    API->>IMG: recolor frame to reference palette
+    IMG-->>API: anchor image
+  and finish analysis
+    API->>VIS: grain / clarity / halation / vignette + lookName
+    VIS-->>API: deltas
+  end
+  API->>API: computeColorTransfer(source distribution → anchor)
+  API->>API: bake 3D LUT · discard the anchor image
+  API->>L: provider, model, tokens, USD
+  API-->>C: lutCube + finish deltas + lookName
+  Note over C: every later apply, tweak, export<br/>reads the LUT — no further calls
+```
 
-Transitioning was a switch, not a rewrite: new subscription line items are refused at the
-checkout API, while existing subscribers keep renewing against their original prices,
-untouched. Entitlement resolves through one access layer, so ownership slotted in as another
-provider rather than a new state every call site had to learn.
+Discarding the anchor is the load-bearing decision. Solving it into a LUT makes the result
+robust to the model reframing or resizing the image, keeps the grade editable instead of
+collapsing into an opaque transform, and means re-applying a saved look costs nothing forever.
+
+**Batch amortises the same call.** Grading a set runs one AI grade on an anchor clip, then
+converges every other clip onto it with deterministic matching. A 100-clip project is one
+charge. Photo projects are unlimited; video projects cap at 100 clips, mobile batches at 20.
 
 ---
 
-## Making AI rare without making the product worse
+## The Adjust Router
 
-**Only one of four grade layers is a model call.** Base balance — exposure, white balance,
-contrast normalization — is computed deterministically from the image's own scope, once, at
-import. Skin and sky protection are deterministic too: on-device face detection and person
-matting produce a mask track that every renderer multiplies into the protection weight. Those
-run free, on the user's machine, every time. The model is only asked for the thing a model is
-actually needed for: what the look *is*.
+Every plain-text prompt goes through `/api/adjust-router` before anything expensive happens;
+reference-match requests skip it entirely.
 
-**And its answer is converted into something reusable.** The image model returns a color anchor;
-a deterministic transfer step maps the source's color distribution onto it and bakes a 3D LUT.
-The anchor image is then thrown away — only the compact LUT is saved. That has three
-consequences: the result is robust to the model reframing or resizing the image, the grade
-stays editable rather than collapsing into an opaque transform, and re-applying a saved look
-costs nothing forever.
+The router reads the current grade as **notches** — every control is a dial with five notches
+per side, `value = (notch / 5) × the control's own range`, defined once in `@flexpresets/core`
+so desktop and mobile share one vocabulary with no hand-tuned step tables to drift apart. It
+returns **absolute destinations, never movements**, so re-running the same request is
+idempotent rather than compounding.
 
-**A hundred clips cost one grade.** Batch mode grades a single anchor clip with AI, then
-converges every other clip onto it with deterministic matching. A 100-clip set is one charge.
+It then picks one of five scopes:
 
-**The router decides what is free.** Every text prompt goes through an adjust router that reads
-the current grade and picks one of five scopes. Asking for "shadows a bit higher" is a
-correction — applied on-device, instantly, free. Undo, redo and reset replay an operation the
-app already holds. A request that is not about color is declined in words, and nothing is
-charged. Only naming a new look actually spends a grade. This holds from the very first prompt:
-"brighter" on a freshly imported photo moves the exposure dial for free rather than spending a
-grade on it.
+| Scope | Example | Cost |
+|---|---|---|
+| `tools` | "lift the shadows a bit" | Free — applied on-device, instantly |
+| `regenerate` | "golden hour" | One AI grade |
+| `history` | undo / redo / reset | Free — replays an operation the app already holds |
+| `out_of_scope` | "remove the person" | Free — declined in words |
 
-That router is a pricing decision implemented as a routing system, and it is the single piece
-of the product I would point at first.
+This holds from the very first prompt: "brighter" on a freshly imported photo moves the exposure
+dial for free instead of spending a grade on it. Clients declare `availableControls` and
+`availableRegions` rather than the server inferring capability from a platform string.
 
-**Targets are absolute, never relative.** The router expresses every control as notches on a
-dial with the value derived from the control's own range, and returns absolute destinations
-rather than movements — so re-running the same request is idempotent instead of drifting
-further each time. The vocabulary is defined once in a shared core package, so desktop and
-mobile speak the same language with no per-platform step tables to fall out of sync. Clients
-declare which controls and regions they can actually render instead of the server inferring it
-from a platform name.
-
-**Every call is priced.** Token usage and USD cost per call go to a ledger; text roles run with
-low reasoning effort, low verbosity and prompt caching. An internal AI-cost dashboard and
-per-account usage view sit on top. One image-model fast path was trialled and removed after
-evaluation — there is an eval harness in the repo for exactly this — and the removal is left in
-the code as a tombstone explaining why.
+The router is a pricing decision implemented as a routing system, and it is the piece of the
+product I would point at first. There is an eval harness for it in the repo
+(`experiments/adjust-router-eval/`), because scope misclassification is the one failure that
+either charges a user for nothing or silently refuses work they paid for.
 
 ---
 
 ## One math, six renderers
 
 The color math is written once as a spec and ported verbatim into six surfaces: the WebGL
-preview, a CPU twin that bakes LUT cubes and does server renders, iOS Metal, Android OpenGL,
-and the macOS Metal and Windows HLSL export workers. The shared types — the grade, the
-parametric tone curve, notch steps, adjustment ranges, HDR transfer math — live in one package
-consumed by web, mobile and scripts.
+preview, a CPU twin that bakes LUT cubes and does server renders, iOS Metal, Android OpenGL, and
+the macOS Metal and Windows HLSL export workers. Shared types — the `Grade`, the parametric tone
+curve, notch steps, adjustment ranges, color cubes, HDR transfer math — live in
+`packages/core`, consumed by web, mobile and scripts alike.
 
-Parity is not assumed; it is tested. Golden-file comparisons, cross-implementation suites
-between the shader and its CPU twin, and roughly 231 instrumented pixel-parity tests on Android
-enforce that what you see in the preview is what lands in the master.
+Parity is enforced, not assumed:
 
-This matters commercially as much as technically. It is what allows the heavy work — actually
-pushing pixels, at 4K, in ProRes — to run locally on hardware the customer already paid for.
-Marginal cost per export is zero, which is the other half of why a perpetual licence closes.
+- **Golden-file comparisons** (`cube-golden.json`) pin the baked LUT output
+- **Shader-to-CPU parity suites** check the GPU path against its CPU twin
+- **~231 instrumented pixel-parity tests on Android** compare rendered output device-side
+- The manual tone controls are a real parametric tone curve, not per-zone brightness offsets
+
+The skin protection is evaluated identically in the WebGL preview and in all three native export
+workers — photos use an exact per-pixel person matte, video uses a tracked person region
+multiplied by a per-frame matte plane, and every backend multiplies the same mask track into the
+protection weight.
+
+This matters commercially as much as technically: it is what lets the heavy work — pushing 4K
+ProRes pixels — run locally on hardware the customer already owns. Marginal cost per export is
+zero, which is the other half of why a perpetual licence closes.
 
 ---
 
-## Shipping on four surfaces
+## Entitlement and billing
 
-**Desktop is the flagship** — an Electron shell around the studio with native render workers and
-bundled FFmpeg. It imports the acquisition formats a browser cannot: ProRes, DNxHR, log
-footage, RAW, HEIC and TIFF, and masters them locally at full quality. Projects are local
-packages; original media never uploads.
+Fauve sells a **perpetual licence**, not a subscription. New customers pay once — list US$129,
+locally priced across nine currencies — and own it. `SUBSCRIPTIONS_OPEN = false` flipped the
+transition: the checkout API refuses new subscription line items with a 410, while existing
+subscribers keep renewing against their original price IDs, untouched.
+
+Ownership resolves as a fifth `provider` in the access layer rather than a new `AccessState`, so
+every `state !== "locked"` call site kept working without modification — the migration was a
+switch, not a rewrite.
+
+```
+active ──(payment fails)──▶ grace (5-day dunning) ──(expires)──▶ locked
+```
+
+`assertActiveAccess(userId)` gates every protected endpoint server-side. The page-level paywall
+is cosmetic; the API guard is the boundary that matters.
+
+Fair use meters only real AI grades. Tweaks, saved-look re-applies, batch follow-on clips and
+exports are all free, which is why the included allowance is documented in the code as *"an
+anti-abuse gate, not a billing unit — median usage makes it last years."* That sentence is only
+writable because the expensive operation is rare by design.
+
+Three payment rails run underneath — Stripe for web and desktop, Apple in-app purchase, Google
+Play billing — each with its own server-to-server notification endpoint, plus a scheduled job
+that sweeps store refunds back into entitlement.
+
+Currency resolves in a fixed order: an explicit `fauve_ccy` cookie override, then geo-IP
+country, then USD. A currency with no Stripe `currency_option` on the target price is never
+exposed, because showing a price the checkout cannot charge is worse than showing USD.
+
+---
+
+## Surfaces
+
+**Desktop is the flagship** — an Electron shell around the studio with native render workers
+(Swift/Metal on macOS, Rust on Windows, Rust/wgpu as the universal fallback) and bundled FFmpeg.
+It imports the acquisition formats a browser cannot — ProRes, DNxHR, log footage, RAW, HEIC,
+TIFF — and masters them locally at full quality. Projects are local `.fauveproject` packages;
+original media never uploads.
 
 **Mobile** is an Expo app for iOS and Android with its own native camera — Apple Log and ProRAW
-on iOS, HLG10 and RAW DNG on Android — a live viewfinder look dial, and batch grading, against
+on iOS, HLG10 and RAW DNG on Android — a 34-look live viewfinder dial, and batch grading against
 the same API.
 
-**Web** is the marketing funnel, checkout and account center; the browser studio still works.
+**Web** carries the marketing funnel, checkout and account center; the browser studio still
+works but new investment goes to desktop.
 
-Three payment rails run underneath: Stripe for web and desktop, Apple in-app purchase, and
-Google Play billing, each with its own server-to-server notification endpoint, and a scheduled
-job that sweeps store refunds back into entitlement. Access is enforced server-side on every
-protected endpoint and derives active → grace → locked from billing state; the page-level
-paywall is cosmetic, the API guard is the real boundary.
+56 API routes back all of it, split roughly into grading and AI (`anchor-match`,
+`adjust-router`, `reference-rank`, `scene-suggestions`, `projects/[id]/interpret`), async jobs
+(`grading-jobs`, `export-jobs` with cancellation), commerce (`billing/*`, `stripe/webhook`,
+`apple/*`, `google/*`), lifecycle crons (`cron/retention`, `cron/winback`, `cron/meta-spend`,
+`cron/iap-refunds`), and operations (`admin/ai-costs`, `admin/saas-metrics`, `job-metrics`,
+`telemetry`, `account/usage`).
 
-Retention and win-back run as scheduled jobs, and ad spend syncs on a cron so acquisition cost
-sits next to the revenue it produced.
+---
+
+## Models, and one that was removed
+
+| Model | Role |
+|---|---|
+| `gpt-image-2` | The color anchor — the only image model in production |
+| `gpt-5.6-luna` | Finish analysis, adjust router, project command planner, memory summarizer, track and scene suggestions, reference ranking |
+| CLIP `clip-vit-base-patch32` | On-device scene classification and find-similar embeddings |
+| RVM `rvm_mobilenetv3` | On-device person matting, ONNX worker |
+| MediaPipe BlazeFace | On-device face detection |
+
+Text roles run with low reasoning effort, low verbosity and prompt caching. Per-call token usage
+and USD cost land in `ai_cost_ledger`, surfaced through an internal AI-cost dashboard and a
+per-account usage view.
+
+An image-model fast path was trialled and removed in August 2026 after evaluation; the removal
+is left in the route as a tombstone explaining why, so the next person does not re-derive it.
+The LUT solve, the cross-clip convergence and the skin and sky guards are deterministic, not
+model calls — that boundary is the product.
 
 ---
 
@@ -174,31 +238,32 @@ Two products came before this.
 system for hardware teams, built out of a year and a half as a PM at ASUS. The product worked.
 The route to market was an accelerator whose ODM network would have been the distribution
 channel; it reached the final interview round and was not selected, and selling NPI software
-factory by factory is a field sales motion I was not going to win. **It taught me that a
-product without a channel is a hobby.**
+factory by factory is a field sales motion I was not going to win. **A product without a channel
+is a hobby.**
 
 [**Vocuz**](https://github.com/jimmy1220fbab/vocuz-case-study) was an AI learning platform where
-the platform generated the courses and users bought them cheaply on top of a subscription. I
-built per-model cost instrumentation into it early, which turned out to be the most useful thing
-in the codebase: it showed that a large course — on the order of 1,400 slides once you count
-narration audio, imagery and three languages — cost more to manufacture than the pricing could
-carry, with speech synthesis and image generation dominating. Without funding to buy time, that
-is not a growth problem, it is an arithmetic one. **It taught me that unit economics are a
-design input, not a reporting output.**
+the platform generated the courses. I built per-model cost instrumentation into it early, which
+turned out to be the most useful thing in the codebase: it showed that a large course — around
+1,400 slides once you count narration audio, imagery and three languages — cost more to
+manufacture than the pricing could carry, with speech synthesis and image generation dominating.
+Without funding to buy time, that is not a growth problem, it is an arithmetic one. **Unit
+economics are a design input, not a reporting output.**
 
-Fauve inherits both answers. Distribution came from FlexPresets' existing customer base rather
-than being wished for. Unit economics were designed in from the first commit — one AI call per
-look, deterministic everything else, rendering on the customer's own hardware — which is
-precisely what makes a one-time licence viable where a subscription would have been mandatory.
+Fauve inherits both answers. It launched into a market I already knew how to reach — five years
+of running acquisition for FlexPresets, at up to NT$500K a month in paid media across nine
+currencies, means the channel was a measured quantity rather than an assumption. Unit economics
+were designed in from the first commit — one AI call per
+look, deterministic everything else, rendering on the customer's own hardware — which is exactly
+what makes a one-time licence viable where a subscription would have been mandatory.
 
 ---
 
 ## Stack
 
-Next.js + TypeScript · Electron desktop shell with native render workers (Swift/Metal on macOS,
-Rust on Windows, Rust/wgpu as universal fallback) · Expo for iOS and Android with native camera
-and renderer modules · shared core package for color math · Supabase Postgres · Stripe, Apple
-IAP and Google Play billing · on-device CLIP, person matting and face detection via ONNX and
-WASM · 56 API routes · golden-file and cross-platform pixel-parity test suites
+Next.js + TypeScript · Electron desktop shell with native render workers (Swift/Metal, Rust,
+Rust/wgpu) · Expo for iOS and Android with native camera and renderer modules · `packages/core`
+shared color math · Supabase Postgres · Stripe + Apple IAP + Google Play billing · on-device
+CLIP, RVM and MediaPipe via ONNX and WASM · bundled FFmpeg · 56 API routes · golden-file and
+cross-platform pixel-parity test suites
 
 > **Source code is private.** Happy to walk through any part of it in an interview.
