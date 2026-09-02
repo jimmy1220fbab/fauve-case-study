@@ -120,37 +120,83 @@ dial for free instead of spending a grade on it. Clients declare `availableContr
 `availableRegions` rather than the server inferring capability from a platform string.
 
 The router is a pricing decision implemented as a routing system, and it is the piece of the
-product I would point at first. There is an eval harness for it in the repo
-(`experiments/adjust-router-eval/`), because scope misclassification is the one failure that
-either charges a user for nothing or silently refuses work they paid for.
+product I would point at first.
+
+**It has an eval harness with a ship bar**, because scope misclassification is the one failure
+that either charges a user for nothing or refuses work they paid for. 156 calls, about $0.03 a
+run — cheap enough that the prompt gets tuned and re-run until it passes rather than argued about.
+
+The bar: scope accuracy ≥90% on every configuration, **`out_of_scope` recall 100%** — a missed
+out-of-scope prompt costs the user a grade, so there is no acceptable miss rate — zero
+colour-wheel leaks on mobile, zero region leaks, and ≥80% region routing where regions were
+offered. The primary readout is a scope confusion matrix; the `tools → regenerate` cell is
+literally the user complaint *"it regenerates instead of using its tools"* turned into a number.
+
+It runs three configurations, because "make the person brighter" has a different correct answer
+in each: desktop (43 controls, global only), mobile with a person detected (37 controls, three
+regions), mobile without (37 controls, global only). Two of the guards are two-sided on purpose —
+the configuration that offers a region must pick it, and the one that does not must answer
+`global` every time. That second direction is the normalizer's job rather than the model's, so a
+single failure there is a normalizer bug, not a prompt-tuning problem.
+
+The most useful thing the harness taught was about itself. Until August 2026 no test case named a
+person or a background, so a router answering `global` to everything scored a clean 100%. Nothing
+was actually broken at the time — the router was right and the mobile client was withholding the
+regions — but **the eval could not have distinguished right-for-the-right-reason from
+right-by-accident, which is the entire point of having one.**
 
 ---
 
-## One math, six renderers
+## Cross-platform color: one artifact, not six ports
 
-The color math is written once as a spec and ported verbatim into six surfaces: the WebGL
-preview, a CPU twin that bakes LUT cubes and does server renders, iOS Metal, Android OpenGL, and
-the macOS Metal and Windows HLSL export workers. Shared types — the `Grade`, the parametric tone
-curve, notch steps, adjustment ranges, color cubes, HDR transfer math — live in
-`packages/core`, consumed by web, mobile and scripts alike.
+Getting identical pixels out of a WebGL preview, an iOS Metal renderer, an Android GL renderer
+and three native export workers is normally a discipline problem — port carefully, test, hope.
+Fauve makes it a structural one.
 
-Parity is enforced, not assumed:
+Every grade compiles down to a single canonical artifact:
 
-- **Golden-file comparisons** (`cube-golden.json`) pin the baked LUT output
-- **Shader-to-CPU parity suites** check the GPU path against its CPU twin
-- **~231 instrumented pixel-parity tests on Android** compare rendered output device-side
-- The manual tone controls are a real parametric tone curve, not per-zone brightness offsets
+```
+CanonicalLook = {
+  cube:   ColorCube                              // 33³ RGB LUT, red-fastest
+  finish: { grain, clarity, halation, vignette } // spatial, per-platform
+}
+```
 
-The skin protection is evaluated identically in the WebGL preview and in all three native export
-workers — photos use an exact per-pixel person matte, video uses a tracked person region
-multiplied by a per-frame matte plane, and every backend multiplies the same mask track into the
-protection weight.
+The split is not arbitrary. **A per-pixel LUT can represent any colour-to-colour transform** —
+exposure, contrast, temperature and tint, saturation, the log wheels, tone curves, the 8-band
+HSL mixer, the secondary qualifier, the skin guard — so all of them bake into `cube`. What a LUT
+*cannot* represent is anything spatial: noise, local contrast, bloom, position-dependent
+darkening. Exactly those four stay as scalars and are implemented per renderer.
 
-This matters commercially as much as technically: it is what lets the heavy work — pushing 4K
-ProRes pixels — run locally on hardware the customer already owns. Marginal cost per export is
-zero, which is the other half of why a perpetual licence closes.
+Which gives the guarantee, quoting the engine doc: *identical `cube` + identical `finish` ⇒
+identical pixels, within renderer epsilon. That is the no-drift guarantee, by construction.*
 
----
+The cube layout is pinned everywhere — size 33, 35,937 triples, red-fastest indexing
+(`idx = ((b*33 + g)*33 + r) * 3`) chosen to match Apple's `CIColorCube` so iOS can hand the bytes
+straight to Core Image. iOS consumes the cube and skips the parametric colour stages entirely,
+because they are already in it. Web renders from the graph and ignores the cube; consuming it for
+bit-exact parity exists behind a flag.
+
+**Three tests make drift impossible to ship:**
+
+- **Parity guard** — the baked cube, sampled, must match the CPU shader port within trilinear
+  tolerance across several real grades. If the baker and the renderer diverge, the build fails.
+- **Completeness guard** — every `Grade` key and every colour trim key must appear in
+  `BAKED_COLOR_KEYS`, and the only un-baked keys must be exactly the four spatial ones. **Adding
+  a new control without classifying it as colour or spatial fails the build.** That is the rule
+  that stops a parameter silently becoming platform-specific again — the failure mode the whole
+  design exists to prevent, caught at compile time rather than in a user's export.
+- **Golden fixture** — a fixed grade's baked cube and sampled outputs are recorded; the iOS
+  Core Image output is spot-checked on-device against those exact numbers.
+
+Plus roughly 231 instrumented pixel-parity tests on Android comparing rendered output device-side.
+
+**Persistence is a billing decision.** Web strips the LUT on save and recomputes it on load — the
+cube never hits disk. iOS persists the grade graph verbatim, ~562 KB of base64 cube included, so
+reopening a project renders correctly with no rehydrate. The reason is not storage: rehydrating
+would re-run the grade, and re-running the grade **would cost the user a credit.** A budget test
+guards that a cube-bearing state stays well under the 2 MB state cap, so a future larger cube
+cannot silently 413 someone's save.
 
 ## Entitlement and billing
 
