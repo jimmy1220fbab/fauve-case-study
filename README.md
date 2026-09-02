@@ -22,36 +22,36 @@ Source code is private. This is the public write-up.
 
 ```mermaid
 flowchart TB
-  IN[Photo, video, RAW, log footage] --> IMPORT
+  IN["Photo, video, RAW, log footage"] --> IMPORT
 
   subgraph Graph["Grade Graph — four layers, one of them costs money"]
-    IMPORT[Base Balance<br/>deterministic · once per clip<br/>NO AI] --> CREATIVE
-    CREATIVE[Creative Look<br/>image model produces a color anchor<br/>solved into a 3D LUT and discarded<br/>THE AI LAYER] --> SECOND
-    SECOND[Secondary<br/>skin + sky protection<br/>on-device face detect and person matting<br/>NO AI · NO CHARGE] --> FINISH
-    FINISH[Finish<br/>grain, clarity, halation, vignette<br/>parallel vision call · same request]
+    IMPORT["Base Balance<br/>deterministic · once per clip<br/>NO AI"] --> CREATIVE
+    CREATIVE["Creative Look<br/>image model produces a color anchor<br/>solved into a 3D LUT and discarded<br/>THE AI LAYER"] --> SECOND
+    SECOND["Secondary<br/>skin + sky protection<br/>on-device face detect and person matting<br/>NO AI · NO CHARGE"] --> FINISH
+    FINISH["Finish<br/>grain, clarity, halation, vignette<br/>parallel vision call · same request"]
   end
 
-  FINISH --> FLAT[flattenGradeGraph<br/>one output]
+  FINISH --> FLAT["flattenGradeGraph<br/>one output"]
 
   subgraph Render["One math, six renderers"]
-    FLAT --> W[WebGL preview]
-    FLAT --> C[CPU twin · bakes LUT cubes]
-    FLAT --> M1[iOS Metal]
-    FLAT --> M2[Android OpenGL]
-    FLAT --> M3[macOS Metal worker]
-    FLAT --> M4[Windows HLSL worker]
+    FLAT --> W["WebGL preview"]
+    FLAT --> C["CPU twin · bakes LUT cubes"]
+    FLAT --> M1["iOS Metal"]
+    FLAT --> M2["Android OpenGL"]
+    FLAT --> M3["macOS Metal worker"]
+    FLAT --> M4["Windows HLSL worker"]
   end
 
-  PROMPT[Text prompt] --> ROUTER{Adjust Router}
-  ROUTER -->|correction| FREE1[On-device dial move<br/>free, instant]
-  ROUTER -->|undo / redo / reset| FREE2[Replay existing op<br/>free]
-  ROUTER -->|not about color| DECLINE[Declined in words<br/>nothing charged]
+  PROMPT["Text prompt"] --> ROUTER{"Adjust Router"}
+  ROUTER -->|correction| FREE1["On-device dial move<br/>free, instant"]
+  ROUTER -->|undo / redo / reset| FREE2["Replay existing op<br/>free"]
+  ROUTER -->|not about color| DECLINE["Declined in words<br/>nothing charged"]
   ROUTER -->|name a look| CREATIVE
 
-  BATCH[Batch: 100 clips] --> ANCHOR[AI grade the anchor clip · 1 charge]
-  ANCHOR --> MATCH[Match the other 99 deterministically · free]
+  BATCH["Batch: 100 clips"] --> ANCHOR["AI grade the anchor clip · 1 charge"]
+  ANCHOR --> MATCH["Match the other 99 deterministically · free"]
 
-  CREATIVE -.token + USD.-> LEDGER[(AI cost ledger)]
+  CREATIVE -.token + USD.-> LEDGER[("AI cost ledger")]
   FINISH -.token + USD.-> LEDGER
 ```
 
