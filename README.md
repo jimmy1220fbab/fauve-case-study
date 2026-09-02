@@ -147,6 +147,72 @@ right-by-accident, which is the entire point of having one.**
 
 ---
 
+## Deep Match: when the architecture, not the tuning, was the problem
+
+Reference matching — "make my footage look like this photo" — was the feature that would not
+come right. Results were washed out, or crushed, and almost never carried the reference's
+character. Months of parameter tuning, clamps and conservative targets did not fix it.
+
+So instead of tuning again, we built a harness that could measure the thing being complained
+about: drive the real application, grade a fixed source against a fixed reference, measure the
+rendered canvas *and* the reference with the pipeline's own scope math, diff, fix, repeat.
+
+It found four problems, and they are four different kinds of failure:
+
+1. **A subsystem was silently dead.** The async grading endpoint rebuilt its request through an
+   allowlist that happened to drop the reference scope, so the deterministic target builder never
+   ran for any async match. The client had been converging on the raw reference — its lighting
+   included. Nothing errored; the feature just quietly did something else.
+2. **The metric was satisfiable the wrong way.** The solver chased average luma and tonal range
+   but nothing pinned the absolute black point, so the cheapest path to "brighter" was floating
+   the entire histogram. The numbers matched. The blacks were visibly lifted. A target that can
+   be hit while looking wrong is not a target.
+3. **The loop was grading a picture nobody saw.** The offscreen renderer used for measurement
+   shared the shader with the display but hand-copied its uniform feeding, and never set the
+   finish-layer uniforms or the secondary mask. It converged beautifully — on an image that was
+   never on screen.
+4. **Two decision-makers were fighting.** The model emitted tonal parameters open-loop, landing
+   about 0.3 of luma away from the target it was nominally serving, and the deterministic loop
+   then spent its whole iteration budget undoing them.
+
+Fixing all four still left a ceiling, and that was the actual finding. What the model could
+communicate to the renderer was roughly **fifteen scope statistics — and infinitely many looks
+satisfy the same fifteen numbers.** Where saturation sits by hue, the split-tone structure, the
+texture: none of that survives the encoding. The model was not failing to understand looks; a
+chat image model repaints a photo into a reference's mood on the first attempt. The understanding
+was being destroyed by forcing it through a narrow numeric bottleneck, blind, with no view of
+what its own numbers rendered as.
+
+**Deep Match replaces the contract instead of tightening it.** One decision-maker, a closed loop,
+real tools and — the part that matters — eyes:
+
+```
+vision model, acting as the colorist
+  sees:  the reference · the original frame · the CURRENT render · scope readouts
+  holds: the real grading controls, with documented ranges and perceptual effects
+  loop:  set parameters → the app renders them on the live preview →
+         screenshot and scopes go back → the model critiques its own result → adjust
+  stops: when the model declares itself satisfied, or at 8 rounds
+```
+
+Candidates render through the **live preview canvas**, not an offscreen twin — measurement and
+display are the same pipeline by construction, which retires failure #3 architecturally rather
+than fixing it again. The scope numbers stay, in two new roles: an instrument panel the model
+reads alongside the images, and post-hoc verification for the harness.
+
+Two constraints kept it a product feature rather than a demo. The output is an **ordinary
+parametric grade** — graph layers — so it remains editable, stable across video frames, and
+exportable, which an image-model repaint is not. And the user's typed prompt rides along as a
+brief, so "match this reference, but warmer" is expressible, which pure deterministic matching
+never could be.
+
+It is still experimental: 3–8 seconds per round, up to eight rounds, desktop only. **Billing is
+not wired up yet — the button currently does not consume an AI grade, and that has to change
+before it ships wider.** In a product whose entire economic argument is that expensive calls are
+rare, an eight-round vision loop is the one feature that could invalidate the model, so it stays
+behind the desktop build until the metering is real.
+
+
 ## Cross-platform color: one artifact, not six ports
 
 Getting identical pixels out of a WebGL preview, an iOS Metal renderer, an Android GL renderer
