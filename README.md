@@ -147,71 +147,91 @@ right-by-accident, which is the entire point of having one.**
 
 ---
 
-## Deep Match: when the architecture, not the tuning, was the problem
+## The one expensive call, and three attempts to delete it
 
-Reference matching — "make my footage look like this photo" — was the feature that would not
-come right. Results were washed out, or crushed, and almost never carried the reference's
-character. Months of parameter tuning, clamps and conservative targets did not fix it.
+Reference matching — "make my footage look like this photo" — is the only place in the product
+that spends real money, so it is the place I tried hardest to make free. Three times. Each attempt
+was measured, and each time the measurement said keep paying.
 
-So instead of tuning again, we built a harness that could measure the thing being complained
-about: drive the real application, grade a fixed source against a fixed reference, measure the
-rendered canvas *and* the reference with the pipeline's own scope math, diff, fix, repeat.
+**First attempt: no model at all.** Solve the LUT directly from the source and reference pixel
+distributions — pure statistics, zero inference cost. It shipped, and it was rejected for unstable
+quality. The reason is the whole problem in one sentence: **a statistical solver has no semantic
+understanding**, so if the reference is half sky and the source contains none, the sky's colours
+get applied to whatever happens to occupy that part of the histogram. Sometimes gorgeous,
+frequently wrong, never predictable.
 
-It found four problems, and they are four different kinds of failure:
+**The fix defines what the model is actually for.** The shipping architecture inserts an *anchor*:
+an image model re-renders the source frame recoloured to the reference's palette, keeping the
+composition, and the LUT is then solved from source → anchor rather than source → reference. The
+anchor's only job is **semantic correspondence — skin to skin, sky to sky.** It is not there to
+be creative or to produce the final image; it is there so the deterministic maths knows which
+region is which. Then it is discarded.
+
+That framing is what makes the cost defensible. You are not paying a model to grade your photo.
+You are paying it once, for correspondence, and every pixel operation afterwards is free.
+
+**Second attempt: give the model eyes instead of numbers.** A measurement harness — drive the
+real app, grade a fixed source against a fixed reference, measure the rendered canvas and the
+reference with the pipeline's own scope maths, diff, fix, repeat — found four failures worth
+knowing about:
 
 1. **A subsystem was silently dead.** The async grading endpoint rebuilt its request through an
    allowlist that happened to drop the reference scope, so the deterministic target builder never
-   ran for any async match. The client had been converging on the raw reference — its lighting
-   included. Nothing errored; the feature just quietly did something else.
+   ran for any async match. Nothing errored; the feature quietly did something else.
 2. **The metric was satisfiable the wrong way.** The solver chased average luma and tonal range
-   but nothing pinned the absolute black point, so the cheapest path to "brighter" was floating
-   the entire histogram. The numbers matched. The blacks were visibly lifted. A target that can
-   be hit while looking wrong is not a target.
-3. **The loop was grading a picture nobody saw.** The offscreen renderer used for measurement
-   shared the shader with the display but hand-copied its uniform feeding, and never set the
-   finish-layer uniforms or the secondary mask. It converged beautifully — on an image that was
-   never on screen.
+   but nothing pinned the absolute black point, so the cheapest route to "brighter" was floating
+   the whole histogram. The numbers matched; the blacks were visibly lifted. A target you can hit
+   while looking wrong is not a target.
+3. **The loop was grading an image nobody saw.** The offscreen renderer used for measurement
+   shared the shader but hand-copied its uniform feeding, and never set the finish-layer uniforms
+   or the secondary mask. It converged beautifully, on a picture that was never on screen.
 4. **Two decision-makers were fighting.** The model emitted tonal parameters open-loop, landing
-   about 0.3 of luma away from the target it was nominally serving, and the deterministic loop
-   then spent its whole iteration budget undoing them.
+   about 0.3 of luma from the target it was nominally serving, and the deterministic loop spent
+   its entire iteration budget undoing them.
 
-Fixing all four still left a ceiling, and that was the actual finding. What the model could
-communicate to the renderer was roughly **fifteen scope statistics — and infinitely many looks
-satisfy the same fifteen numbers.** Where saturation sits by hue, the split-tone structure, the
-texture: none of that survives the encoding. The model was not failing to understand looks; a
-chat image model repaints a photo into a reference's mood on the first attempt. The understanding
-was being destroyed by forcing it through a narrow numeric bottleneck, blind, with no view of
-what its own numbers rendered as.
+All four were fixed, and the reference-target, converge and scope-analysis modules that came out
+of it are still in the shipping product with their test suites. But the exercise surfaced a
+ceiling that fixing bugs could not move: what the model could communicate to the renderer was
+about **fifteen scope statistics, and infinitely many looks satisfy the same fifteen numbers.**
+Where saturation sits by hue, the split-tone structure, the texture — none of it survives that
+encoding.
 
-**Deep Match replaces the contract instead of tightening it.** One decision-maker, a closed loop,
-real tools and — the part that matters — eyes:
+So a prototype went the other way: one decision-maker, closed loop, the real grading controls, and
+actual sight of the live preview between rounds, up to eight rounds. It was built and documented.
+**It is not in the product** — the shipping path is still the single-call anchor match, and an
+eight-round vision loop was never going to survive a pricing model whose entire argument is that
+expensive calls are rare.
 
-```
-vision model, acting as the colorist
-  sees:  the reference · the original frame · the CURRENT render · scope readouts
-  holds: the real grading controls, with documented ranges and perceptual effects
-  loop:  set parameters → the app renders them on the live preview →
-         screenshot and scopes go back → the model critiques its own result → adjust
-  stops: when the model declares itself satisfied, or at 8 rounds
-```
+**Third attempt: move the model on-device.** If the anchor is the cost, run it locally. The
+candidate was a 2026 CVPR model that outputs an image-adaptive 17³ LUT — task-exact, since a LUT
+is already the native artifact — about 5M parameters, roughly 10 MB, smaller than the CLIP model
+already running in the browser, 8 ms per frame on GPU, standard ONNX ops, and Apache-2.0 licensed
+including the weights. The drivers were written down in priority order: **cost first, speed
+second.**
 
-Candidates render through the **live preview canvas**, not an offscreen twin — measurement and
-display are the same pipeline by construction, which retires failure #3 architecturally rather
-than fixing it again. The scope numbers stay, in two new roles: an instrument panel the model
-reads alongside the images, and post-hoc verification for the harness.
+Phase 0 was an evaluation, not an integration. Fourteen real source/reference pairs, scored by Lab
+palette distance to the reference and by eye. **Verdict: FAIL.** Mean distance 13.7 for the cloud
+model against 20.2 for the local one, with the cloud model closer on thirteen of the fourteen
+pairs. The experiment was closed and Phase 1 was never built. The write-up records the caveat
+honestly — the paper's primary checkpoint link was broken, so vendor-default weights were used —
+which is the difference between a verdict and an excuse.
 
-Two constraints kept it a product feature rather than a demo. The output is an **ordinary
-parametric grade** — graph layers — so it remains editable, stable across video frames, and
-exportable, which an image-model repaint is not. And the user's typed prompt rides along as a
-brief, so "match this reference, but warmer" is expressible, which pure deterministic matching
-never could be.
+**The expensive call stayed because it earned its cost.** That is a less exciting conclusion than
+replacing it would have been, and it is the one the measurements supported.
 
-It is still experimental: 3–8 seconds per round, up to eight rounds, desktop only. **Billing is
-not wired up yet — the button currently does not consume an AI grade, and that has to change
-before it ships wider.** In a product whose entire economic argument is that expensive calls are
-rare, an eight-round vision loop is the one feature that could invalidate the model, so it stays
-behind the desktop build until the metering is real.
+---
 
+## How decisions get recorded
+
+There are 136 dated design documents in this repo covering May through August 2026 — pricing
+ladders, the HDR pipeline, native export parity, the notched-tools router redesign, the perpetual
+licence, each mobile release. Significant changes get a written design before they get code.
+
+More usefully, experiments get a **verdict file**. Two of them read FAIL: the on-device anchor
+model above, and a subject-separation experiment closed the same way. Writing down what was tried
+and rejected — with the numbers, and with the caveats that weaken your own conclusion — is what
+stops a team relitigating the same idea every quarter, and it is the only part of this that
+compounds.
 
 ## Cross-platform color: one artifact, not six ports
 
@@ -321,7 +341,7 @@ works but new investment goes to desktop.
 
 ---
 
-## Models, and one that was removed
+## What each model is for
 
 | Model | Role |
 |---|---|
@@ -335,10 +355,13 @@ Text roles run with low reasoning effort, low verbosity and prompt caching. Per-
 and USD cost land in `ai_cost_ledger`, surfaced through an internal AI-cost dashboard and a
 per-account usage view.
 
-An image-model fast path was trialled and removed in August 2026 after evaluation; the removal
-is left in the route as a tombstone explaining why, so the next person does not re-derive it.
-The LUT solve, the cross-clip convergence and the skin and sky guards are deterministic, not
-model calls — that boundary is the product.
+A cheaper image-model fast path was trialled and removed in August 2026 — the fourth entry in the
+pattern above — and the removal is left in the route as a tombstone explaining why, so nobody
+re-derives it in six months.
+
+Everything not in that table is deterministic: the LUT solve, the cross-clip convergence, the skin
+and sky guards. **That boundary is the product.** Above it, one call for semantic understanding;
+below it, code that costs nothing to run a thousand times.
 
 ---
 
