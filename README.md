@@ -14,6 +14,25 @@ one-time licence stays solvent for years — which is an architecture problem, n
 Fauve is the AI-native evolution of FlexPresets, a photography presets and LUT business I ran
 for five years.
 
+> ### At a glance
+>
+> **Context** — FlexPresets sold static presets and LUTs for five years. Its AI-native successor
+> had to actually grade a customer's own footage, on every platform they shoot and edit on, and
+> stay cheap enough to run that it could be sold once rather than rented.
+>
+> **What I owned** — product direction, UX, the AI architecture, pricing, releases and customer
+> operations. Four surfaces from one codebase: desktop (macOS and Windows), iOS, Android, web.
+> An agentic editing layer that interprets a request against the current grade and executes real
+> operations, including refusing the ones it shouldn't. A perpetual licence across nine
+> currencies, replacing subscriptions without disturbing existing subscribers.
+>
+> **The core decision** — every look costs exactly one model call; the base correction, the skin
+> and sky protection, the batch matching and every export are deterministic and free. That is
+> what makes a one-time price survivable, and the rest of this write-up is how it was enforced.
+>
+> **Where it stands** — 1.0 shipped end of August 2026 and it is on 1.2.2 now. Shipped through
+> App Store review, Play Console and Windows release. Too early for meaningful revenue.
+
 Source code is private. This is the public write-up.
 
 ---
