@@ -196,11 +196,19 @@ about **fifteen scope statistics, and infinitely many looks satisfy the same fif
 Where saturation sits by hue, the split-tone structure, the texture — none of it survives that
 encoding.
 
-So a prototype went the other way: one decision-maker, closed loop, the real grading controls, and
-actual sight of the live preview between rounds, up to eight rounds. It was built and documented.
-**It is not in the product** — the shipping path is still the single-call anchor match, and an
-eight-round vision loop was never going to survive a pricing model whose entire argument is that
-expensive calls are rare.
+So a prototype went the other way: one decision-maker, a closed loop, the real grading controls,
+and actual sight of the live preview between rounds, up to eight rounds. It was built and
+documented, and **it is not in the product.**
+
+It was killed on latency first. Each round is one vision call at three to eight seconds, so a
+match ran twenty-five seconds to a minute — against a single request for the shipped path. Nobody
+waits a minute to see whether a look landed, and a colour tool that cannot be iterated on quickly
+is not a colour tool. The economics finished the argument: eight vision calls per match, in a
+product whose entire pricing rests on expensive calls being rare, did not pay for the quality it
+bought.
+
+The quality insight survived the prototype, though — it is why the anchor exists at all, and why
+the model is asked for correspondence rather than for a finished grade.
 
 **Third attempt: move the model on-device.** If the anchor is the cost, run it locally. The
 candidate was a 2026 CVPR model that outputs an image-adaptive 17³ LUT — task-exact, since a LUT
